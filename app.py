@@ -2,55 +2,73 @@ import streamlit as st
 import cv2
 import numpy as np
 import tempfile
-from ultralytics import YOLO
+import av
 
-model = YOLO("best.pt")
+from ultralytics import YOLO
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+
+# ====================================================
+# MODEL
+# ====================================================
+
+@st.cache_resource
+def load_model():
+    return YOLO("best.pt")
+
+model = load_model()
 
 st.title("🔒 Floutage plaques YOLO")
 
 mode = st.sidebar.radio(
     "Mode",
-    ["Image", "Vidéo", "Webcam"]
+    ["Image", "Vidéo", "Webcam", "Téléphone"]
 )
 
-# =========================
-# FONCTION FLOUTAGE
-# =========================
+# ====================================================
+# FLOUTAGE
+# ====================================================
+
 def blur_plates(frame):
 
     results = model(
-    frame,
-    conf=0.15,      #plus il est petit plus il reconnais les objets difficiles ou à moitié mais a beaucoup de faux posififs
-    iou=0.45,   #élimine la double détection
-    imgsz=928,  #plus il est grand plus détecte les petites plaques mais rend l'algorithme très lent   
-    verbose=False
-)
+        frame,
+        conf=0.15,
+        iou=0.45,
+        imgsz=928,
+        verbose=False
+    )
+
     nb_plaques = len(results[0].boxes)
-    cv2.putText(frame,
-                    f"nombre de plaque{nb_plaques}",
-                    (frame.shape[1] - 250, 30),  # position (x, y),
-                    cv2.FONT_HERSHEY_SIMPLEX,     # police
-                    0.50,                            # taille
-                    (255, 20, 255),             # couleur  (BGR)
-        2,                           # épaisseur
-)
+
+    cv2.putText(
+        frame,
+        f"Plaques : {nb_plaques}",
+        (20, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 20, 255),
+        2
+    )
 
     for box in results[0].boxes.xyxy.cpu().numpy():
 
         x1, y1, x2, y2 = map(int, box[:4])
-        
 
         roi = frame[y1:y2, x1:x2]
 
         if roi.size > 0:
-            frame[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (51, 51), 30)
+            frame[y1:y2, x1:x2] = cv2.GaussianBlur(
+                roi,
+                (51, 51),
+                30
+            )
 
     return frame
 
+# ====================================================
+# IMAGE
+# ====================================================
 
-# =========================
-# IMAGE (glisser-déposer)
-# =========================
 if mode == "Image":
 
     img_file = st.file_uploader(
@@ -60,29 +78,41 @@ if mode == "Image":
 
     if img_file:
 
-        file_bytes = np.asarray(bytearray(img_file.read()), dtype=np.uint8)
-        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        file_bytes = np.asarray(
+            bytearray(img_file.read()),
+            dtype=np.uint8
+        )
 
+        img = cv2.imdecode(
+            file_bytes,
+            cv2.IMREAD_COLOR
+        )
 
         img = blur_plates(img)
 
+        st.image(
+            cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        )
 
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+# ====================================================
+# VIDEO
+# ====================================================
 
-        st.image(img)
-
-
-# =========================
-# VIDÉO (mp4 avi mov mkv)
-# =========================
 elif mode == "Vidéo":
 
     video_file = st.file_uploader(
-        "Glisser-déposer une vidéo",
-        type=["mp4", "mkv", "avi", "mov"]
+        "📤 Glisser-déposer une vidéo",
+        type=["mp4", "avi", "mov", "mkv"]
     )
 
     if video_file:
+
+        skip = st.slider(
+            "Skip frames",
+            1,
+            5,
+            1
+        )
 
         tfile = tempfile.NamedTemporaryFile(delete=False)
         tfile.write(video_file.read())
@@ -91,51 +121,81 @@ elif mode == "Vidéo":
 
         frame_placeholder = st.empty()
 
-        skip = st.slider("Skip frames (perf)", 1, 5, 1)
-
         i = 0
 
         while cap.isOpened():
 
             ret, frame = cap.read()
+
             if not ret:
                 break
 
             i += 1
+
             if i % skip != 0:
                 continue
 
             frame = blur_plates(frame)
 
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            frame_placeholder.image(frame)
+            frame_placeholder.image(
+                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            )
 
         cap.release()
 
+# ====================================================
+# WEBCAM / TELEPHONE
+# ====================================================
 
-# =========================
-# WEBCAM LIVE
-# =========================
-elif mode == "Webcam":
+elif mode in ["Webcam", "Téléphone"]:
 
-    run = st.checkbox("▶️ Démarrer webcam")
+    skip = st.slider(
+        "Skip frames (perf)",
+        1,
+        5,
+        3
+    )
 
-    frame_placeholder = st.empty()
+    class PlateProcessor(VideoProcessorBase):
 
-    cap = cv2.VideoCapture(0)
+        def __init__(self):
+            self.frame_count = 0
+            self.last_frame = None
 
-    while run:
+        def recv(self, frame):
 
-        ret, frame = cap.read()
-        if not ret:
-            st.error("Webcam non disponible")
-            break
+            img = frame.to_ndarray(format="bgr24")
 
-        frame = blur_plates(frame)
+            self.frame_count += 1
 
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if self.frame_count % skip == 0:
 
-        frame_placeholder.image(frame)
+                self.last_frame = blur_plates(img)
 
-    cap.release()
+            if self.last_frame is None:
+                self.last_frame = img
+
+            return av.VideoFrame.from_ndarray(
+                self.last_frame,
+                format="bgr24"
+            )
+
+    constraints = {
+        "video": True,
+        "audio": False,
+    }
+
+    if mode == "Téléphone":
+        constraints = {
+            "video": {
+                "facingMode": "environment"
+            },
+            "audio": False,
+        }
+
+    webrtc_streamer(
+        key=f"camera-{mode}",
+        video_processor_factory=PlateProcessor,
+        media_stream_constraints=constraints,
+        async_processing=True,
+    )
