@@ -3,16 +3,7 @@ import cv2
 import numpy as np
 import tempfile
 import av
-import streamlit as st
-import traceback
 
-try:
-    import cv2
-    st.success(f"OpenCV OK : {cv2.__version__}")
-
-except Exception:
-    st.code(traceback.format_exc())
-    st.stop()
 
 from ultralytics import YOLO
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
